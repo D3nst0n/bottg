@@ -1,5 +1,4 @@
 import os
-
 from pyexpat.errors import messages
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ConversationHandler)
@@ -7,8 +6,226 @@ import random
 import requests
 import json
 from datetime import datetime
-import os
 from dotenv import load_dotenv
+import psycopg2
+from psycopg2 import sql
+
+DB_HOST = os.getenv('DB_HOST', 'localhost')
+DB_PORT = os.getenv('DB_PORT', '5432')
+DB_NAME = os.getenv('DB_NAME', 'telegram_bot')
+DB_USER = os.getenv('DB_USER', 'postgres')
+DB_PASSWORD = os.getenv('DB_PASSWORD', 'password')
+
+
+def get_db_connection( ):
+	"""Создает подключение к PostgreSQL"""
+	try:
+		conn = psycopg2.connect(
+			host=DB_HOST,
+			port=DB_PORT,
+			dbname=DB_NAME,
+			user=DB_USER,
+			password=DB_PASSWORD
+		)
+		return conn
+	except Exception as e:
+		print(f"Ошибка подключения к БД: {e}")
+		return None
+
+
+def init_db( ):
+	conn = get_db_connection( )
+	if not conn:
+		return
+
+	try:
+		cursor = conn.cursor( )
+
+		# Таблица пользователей
+		cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username VARCHAR(100),
+                first_name VARCHAR(100),
+                last_name VARCHAR(100),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                message_count INTEGER DEFAULT 0,
+                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+		# Таблица отзывов
+		cursor.execute('''
+            CREATE TABLE IF NOT EXISTS feedbacks (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(user_id),
+                user_name VARCHAR(100),
+                feedback_text TEXT,
+                rating INTEGER CHECK (rating >= 1 AND rating <= 5),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+		cursor.execute('''
+            CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(user_id),
+                message_text TEXT,
+                message_type VARCHAR(50),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+		conn.commit( )
+		print("Таблицы успешно созданы")
+
+	except Exception as e:
+		print(f"Ошибка при создании таблиц: {e}")
+		conn.rollback( )
+	finally:
+		cursor.close( )
+		conn.close( )
+
+init_db( )
+
+
+def save_user(user_id, username, first_name, last_name):
+	"""Сохраняет или обновляет пользователя"""
+	conn = get_db_connection( )
+	if not conn:
+		return
+
+	try:
+		cursor = conn.cursor( )
+		cursor.execute('''
+            INSERT INTO users (user_id, username, first_name, last_name, last_activity)
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id) 
+            DO UPDATE SET 
+                username = EXCLUDED.username,
+                first_name = EXCLUDED.first_name,
+                last_name = EXCLUDED.last_name,
+                last_activity = CURRENT_TIMESTAMP
+        ''', (user_id, username, first_name, last_name))
+
+		conn.commit( )
+	except Exception as e:
+		print(f"Ошибка при сохранении пользователя: {e}")
+		conn.rollback( )
+	finally:
+		cursor.close( )
+		conn.close( )
+
+
+def increment_message_count(user_id):
+	"""Увеличивает счетчик сообщений пользователя"""
+	conn = get_db_connection( )
+	if not conn:
+		return
+
+	try:
+		cursor = conn.cursor( )
+		cursor.execute('''
+            UPDATE users 
+            SET message_count = message_count + 1,
+                last_activity = CURRENT_TIMESTAMP
+            WHERE user_id = %s
+        ''', (user_id,))
+
+		conn.commit( )
+	except Exception as e:
+		print(f"Ошибка при обновлении счетчика: {e}")
+	finally:
+		cursor.close( )
+		conn.close( )
+
+
+def save_feedback(user_id, user_name, feedback_text, rating):
+	"""Сохраняет отзыв в базу данных"""
+	conn = get_db_connection( )
+	if not conn:
+		return False
+
+	try:
+		cursor = conn.cursor( )
+		cursor.execute('''
+            INSERT INTO feedbacks (user_id, user_name, feedback_text, rating)
+            VALUES (%s, %s, %s, %s)
+        ''', (user_id, user_name, feedback_text, rating))
+
+		conn.commit( )
+		return True
+	except Exception as e:
+		print(f"Ошибка при сохранении отзыва: {e}")
+		conn.rollback( )
+		return False
+	finally:
+		cursor.close( )
+		conn.close( )
+
+
+def get_user_stats(user_id):
+	"""Получает статистику пользователя"""
+	conn = get_db_connection( )
+	if not conn:
+		return None
+
+	try:
+		cursor = conn.cursor( )
+		cursor.execute('''
+            SELECT user_id, username, first_name, last_name, 
+                   message_count, last_activity
+            FROM users 
+            WHERE user_id = %s
+        ''', (user_id,))
+
+		user = cursor.fetchone( )
+		return user
+	except Exception as e:
+		print(f"Ошибка при получении статистики: {e}")
+		return None
+	finally:
+		cursor.close( )
+		conn.close( )
+
+
+def get_feedbacks_stats( ):
+	"""Получает статистику по отзывам"""
+	conn = get_db_connection( )
+	if not conn:
+		return None
+
+	try:
+		cursor = conn.cursor( )
+
+		# Средняя оценка
+		cursor.execute('SELECT AVG(rating) FROM feedbacks')
+		avg_rating = cursor.fetchone( )[0]
+
+		# Количество отзывов
+		cursor.execute('SELECT COUNT(*) FROM feedbacks')
+		total_feedbacks = cursor.fetchone( )[0]
+
+		# Распределение по оценкам
+		cursor.execute('''
+            SELECT rating, COUNT(*) 
+            FROM feedbacks 
+            GROUP BY rating 
+            ORDER BY rating
+        ''')
+		rating_distribution = cursor.fetchall( )
+
+		return {
+			'avg_rating': round(avg_rating, 2) if avg_rating else 0,
+			'total_feedbacks': total_feedbacks,
+			'rating_distribution': rating_distribution
+		}
+	except Exception as e:
+		print(f"Ошибка при получении статистики отзывов: {e}")
+		return None
+	finally:
+		cursor.close( )
+		conn.close( )
 
 load_dotenv()
 
@@ -405,7 +622,6 @@ def main( ):
 			CONFIRMATION: [CallbackQueryHandler(confirm_feedback, pattern="^confirm_")]
 		},
 		fallbacks=[CommandHandler('cancel', cancel_feedback)],
-		per_message=True
 	)
 
 	# Обработчики команд
