@@ -7,11 +7,15 @@ import random
 import requests
 import json
 from datetime import datetime
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
 
+BOT_TOKEN = os.getenv('BOT_TOKEN')
 
-BOT_TOKEN = '8394385147:AAFXWyxFJYAAY2aqh1tA5GS2RBaJrb68GFU'
-
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не найден в переменных окружения")
 NAME, FEEDBACK, RATING, CONFIRMATION = range(4)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
